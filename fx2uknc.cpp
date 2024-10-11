@@ -336,7 +336,6 @@ void PaintUkncScreen (int nbuf)
 // render pic in separate thread
 DWORD WINAPI RenderThreadProc (LPVOID lpParam)
 {
-    LONGLONG rtStart;
     while (stop == 0) {
         uint32_t n = scr_n_cur; // (scr_n_cur-1)&0x07;
         while (n == scr_n_cur) {}
@@ -436,7 +435,7 @@ void InitWindows (void)
     // rendering
     hRenderThread = CreateThread(NULL, 0, RenderThreadProc, 0, 0, NULL);
     // TODO: use timer for check FX2 is alive and try to (re)start it if not
-    // SetTimer(hMain, 1/*Timer ID*/, 1000, NULL);
+    SetTimer(hMain, 1/*Timer ID*/, 1000, NULL);
 }
 
 
