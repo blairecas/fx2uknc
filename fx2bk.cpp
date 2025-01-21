@@ -47,11 +47,31 @@
 
     uint32_t fx2data2rgb[32] = {
         // 4 main colors
-        0x000000, 0x0000FF, 0x00FF00, 0xFF0000, 0x000000, 0x000000, 0x000000, 0x000000,
+        0x000000, 0x8080FF, 0x80FF80, 0xFF8080, 0x000000, 0x000000, 0x000000, 0x000000,
         0x000000, 0x000000, 0x000000, 0x000000, 0x000000, 0x000000, 0x000000, 0x000000,
         // to show sync signal
         0x005234, 0x005234, 0x005234, 0x005234, 0x005234, 0x005234, 0x005234, 0x005234,
         0x005234, 0x005234, 0x005234, 0x005234, 0x005234, 0x005234, 0x005234, 0x005234
+    };
+
+    uint8_t palette = 0;
+    uint32_t palette_data[] = {
+        0x000000, 0x0000FF, 0x00FF00, 0xFF0000, // std palettes
+        0x000000, 0xFFFF00, 0xFF00FF, 0xFF0000,
+        0x000000, 0x00FFFF, 0x0000FF, 0xFF00FF,
+        0x000000, 0x00FF00, 0x00FFFF, 0xFFFF00,
+        0x000000, 0xFF00FF, 0x00FFFF, 0xFFFFFF,
+        0x000000, 0xFFFFFF, 0xFFFFFF, 0xFFFFFF,
+        0x000000, 0xC00000, 0x900000, 0xFF0000,
+        0x000000, 0xC0FF00, 0x90FF00, 0xFFFF00,
+        0x000000, 0xC000FF, 0x9000FF, 0xFF00FF,
+        0x000000, 0x90FF00, 0x9000FF, 0x900000,
+        0x000000, 0xC0FF00, 0xC000FF, 0xC00000,
+        0x000000, 0x00FFFF, 0xFFFF00, 0xFF0000,
+        0x000000, 0xFF0000, 0x00FF00, 0x00FFFF,
+        0x000000, 0x00FFFF, 0xFFFF00, 0xFFFFFF,
+        0x000000, 0xFFFF00, 0x00FF00, 0xFFFFFF,
+        0x000000, 0x00FFFF, 0x00FF00, 0xFFFFFF
     };
 
     char error[1024];
@@ -248,12 +268,12 @@ void LIBUSB_CALL cb_transfer_complete (libusb_transfer *t)
     }
     // process pixel data
     volatile uint32_t* screen_buf = scr_buffers[scr_n_cur];
-    uint8_t bmask = scr_show_sync ? 0x1F : 0x0F;
+    // uint8_t bmask = scr_show_sync ? 0x1F : 0x0F;
     //
     for (int i=0; i<t->actual_length; i++)
     {
         uint8_t b = (t->buffer[i] ^ 0xFF) & 0x13;
-        uint32_t dw = fx2data2rgb[b & bmask];
+        uint32_t dw = palette_data[(palette<<2) | (b&3)]; // fx2data2rgb[b & bmask];        
         if (b == 0x10) {
             scr_lsync_cnt++;
         } else {
@@ -309,11 +329,28 @@ void LIBUSB_CALL cb_transfer_complete (libusb_transfer *t)
     const int IDM_SAVE_SIG  = 2;
     const int IDM_BLACKWHI  = 3;
     const int IDM_SAVESCR   = 4;
+    const int IDM_PALETTE00  = 0x10;
+    const int IDM_PALETTE01  = 0x11;
+    const int IDM_PALETTE02  = 0x12;
+    const int IDM_PALETTE03  = 0x13;
+    const int IDM_PALETTE04  = 0x14;
+    const int IDM_PALETTE05  = 0x15;
+    const int IDM_PALETTE06  = 0x16;
+    const int IDM_PALETTE07  = 0x17;
+    const int IDM_PALETTE08  = 0x18;
+    const int IDM_PALETTE09  = 0x19;
+    const int IDM_PALETTE10  = 0x1A;
+    const int IDM_PALETTE11  = 0x1B;
+    const int IDM_PALETTE12  = 0x1C;
+    const int IDM_PALETTE13  = 0x1D;
+    const int IDM_PALETTE14  = 0x1E;
+    const int IDM_PALETTE15  = 0x1F;
 
     uint32_t    nLastBuf = 0;
     uint8_t     BlackWhiteMode = 0;
     
     wchar_t     wError[1024];
+    wchar_t     wcsTemp[256];
 
     uint32_t    ntimes[1024];
     uint32_t    ttimes[1024];
@@ -438,6 +475,7 @@ LONG MainWndProc (HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
 {
     if (hwnd == hMain) switch( msg )
     {
+        // usually menu
         case WM_COMMAND:
             switch (LOWORD(wparam)) {
                 case IDM_SHOW_SYNC:
@@ -457,10 +495,19 @@ LONG MainWndProc (HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
                     MessageBoxW(hMain, L"Screenshot written to file screenshot.bmp", L"Info", MB_OK);
                     break;
             }
+            // palettes menu
+            if ((LOWORD(wparam) >= IDM_PALETTE00) && (LOWORD(wparam) <= IDM_PALETTE15)) 
+            {
+                palette = LOWORD(wparam) - IDM_PALETTE00;
+                for (int i=IDM_PALETTE00; i<=IDM_PALETTE15; i++) CheckMenuItem(hMenuOptions, i, MF_UNCHECKED);
+                CheckMenuItem(hMenuOptions, LOWORD(wparam), MF_CHECKED);
+            }
             break;
+        // minimize/maximize/resize
         case WM_SIZE: 
             if (wparam==SIZE_MINIMIZED) {}
             break;
+        // move
         case WM_MOVE: 
             W_X = (int) LOWORD(lparam);
             W_Y = (int) HIWORD(lparam);
@@ -475,6 +522,7 @@ LONG MainWndProc (HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
                 fx2_send_start();
             }
             return 0L;
+        // the end
         case WM_DESTROY: 
             PostQuitMessage(0);
             return 0L;
@@ -508,6 +556,13 @@ void InitWindows (void)
     hMenuOptions = CreateMenu();
     AppendMenuW(hMenuOptions, MF_STRING, IDM_SHOW_SYNC, L"Show sync signal");
     AppendMenuW(hMenuOptions, MF_STRING, IDM_BLACKWHI, L"Black & white");
+    AppendMenuW(hMenuOptions, MF_SEPARATOR, 0, 0);
+    for (int i=IDM_PALETTE00; i<=IDM_PALETTE15; i++) {
+        wsprintf(wcsTemp, L"Palette %i", i-IDM_PALETTE00);
+        AppendMenuW(hMenuOptions, MF_STRING, i, wcsTemp);
+    }
+    CheckMenuItem(hMenuOptions, IDM_PALETTE00+palette, MF_CHECKED);
+    AppendMenuW(hMenuOptions, MF_SEPARATOR, 0, 0);
     AppendMenuW(hMenuOptions, MF_STRING, IDM_SAVESCR, L"Save screenshot");
     // AppendMenuW(hMenuOptions, MF_STRING, IDM_SAVE_SIG, L"Save signal binary");
     HMENU hMenubar = CreateMenu();
