@@ -45,19 +45,11 @@
     int handled_count = 0;          // count of processed usb bulk transfers
     int errors_count = 0;           // count of not processed
 
-    uint32_t fx2data2rgb[32] = {
-        // 4 main colors
-        0x000000, 0x8080FF, 0x80FF80, 0xFF8080, 0x000000, 0x000000, 0x000000, 0x000000,
-        0x000000, 0x000000, 0x000000, 0x000000, 0x000000, 0x000000, 0x000000, 0x000000,
-        // to show sync signal
-        0x005234, 0x005234, 0x005234, 0x005234, 0x005234, 0x005234, 0x005234, 0x005234,
-        0x005234, 0x005234, 0x005234, 0x005234, 0x005234, 0x005234, 0x005234, 0x005234
-    };
-
-    uint8_t palette = 0;
+    uint8_t palette = 1;            // BK palette = this palette - 1
     uint32_t palette_data[] = {
-        0x000000, 0x0000FF, 0x00FF00, 0xFF0000, // std palettes
-        0x000000, 0xFFFF00, 0xFF00FF, 0xFF0000,
+        0x000000, 0x0000FF, 0x00FF00, 0xFF0000, // 0 - (special) black/white palette
+        0x000000, 0x0000FF, 0x00FF00, 0xFF0000, // 1 - std palette 0
+        0x000000, 0xFFFF00, 0xFF00FF, 0xFF0000, // .. etc
         0x000000, 0x00FFFF, 0x0000FF, 0xFF00FF,
         0x000000, 0x00FF00, 0x00FFFF, 0xFFFF00,
         0x000000, 0xFF00FF, 0x00FFFF, 0xFFFFFF,
@@ -216,6 +208,7 @@ int usb_write_firmware ()
     res = fx2_reset(device_h, 0);
     if (res != 0) return res;
     Sleep(3000);
+    // init with y-salnikov's now
     return usb_init(0xFFFF, 0x2048);
 }
 
@@ -268,13 +261,13 @@ void LIBUSB_CALL cb_transfer_complete (libusb_transfer *t)
     }
     // process pixel data
     volatile uint32_t* screen_buf = scr_buffers[scr_n_cur];
-    // uint8_t bmask = scr_show_sync ? 0x1F : 0x0F;
     //
     for (int i=0; i<t->actual_length; i++)
     {
         uint8_t b = (t->buffer[i] ^ 0xFF) & 0x13;
-        uint32_t dw = palette_data[(palette<<2) | (b&3)]; // fx2data2rgb[b & bmask];        
+        uint32_t dw = palette_data[(palette<<2) | (b&3)];
         if (b == 0x10) {
+            if (scr_show_sync) dw = dw | 0x808080;
             scr_lsync_cnt++;
         } else {
             // sort of hsync, exact 0x38 low sync signals
@@ -327,8 +320,9 @@ void LIBUSB_CALL cb_transfer_complete (libusb_transfer *t)
 
     const int IDM_SHOW_SYNC = 1;
     const int IDM_SAVE_SIG  = 2;
-    const int IDM_BLACKWHI  = 3;
     const int IDM_SAVESCR   = 4;
+
+    const int IDM_PALETTEBW  = 0x0F;
     const int IDM_PALETTE00  = 0x10;
     const int IDM_PALETTE01  = 0x11;
     const int IDM_PALETTE02  = 0x12;
@@ -347,7 +341,6 @@ void LIBUSB_CALL cb_transfer_complete (libusb_transfer *t)
     const int IDM_PALETTE15  = 0x1F;
 
     uint32_t    nLastBuf = 0;
-    uint8_t     BlackWhiteMode = 0;
     
     wchar_t     wError[1024];
     wchar_t     wcsTemp[256];
@@ -424,11 +417,12 @@ DWORD WINAPI RenderThreadProc (LPVOID lpParam)
         while (n == scr_n_cur) {}
         nLastBuf = n;
         volatile uint32_t *buf = scr_buffers[n];
-        if (BlackWhiteMode) {
+        // black & white mode?
+        if (palette == 0) {
             for (uint32_t u=0; u<BK_SCR_FULL; u+=2) {
-                uint32_t b1 = (buf[u] & 0x0000FF) ? 0xFFFFFF : 0x000000;
-                uint32_t b2 = (buf[u] & 0x00FF00) ? 0xFFFFFF : 0x000000;
-                if (buf[u] & 0xFF0000) { b1=0xFFFFFF; b2=0xFFFFFF; }
+                uint32_t b1 = (buf[u] & 0x00000F) ? 0xFFFFFF : 0x000000;
+                uint32_t b2 = (buf[u] & 0x000F00) ? 0xFFFFFF : 0x000000;
+                if (buf[u] & 0x0F0000) { b1=0xFFFFFF; b2=0xFFFFFF; }
                 buf[u] = b1;
                 buf[u+1] = b2;
             }
@@ -485,10 +479,6 @@ LONG MainWndProc (HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
                 //case IDM_SAVEBIN:
                 //    MessageBoxW(hMain, L"Signal data saved to signal.bin", L"Info", MB_OK);
                 //    break;
-                case IDM_BLACKWHI:
-                    BlackWhiteMode = 1 - BlackWhiteMode;
-                    CheckMenuItem(hMenuOptions, IDM_BLACKWHI, BlackWhiteMode ? MF_CHECKED : MF_UNCHECKED);
-                    break;
                 // save screen from current-1 buffer
                 case IDM_SAVESCR:
                     WriteBmp();
@@ -496,10 +486,10 @@ LONG MainWndProc (HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
                     break;
             }
             // palettes menu
-            if ((LOWORD(wparam) >= IDM_PALETTE00) && (LOWORD(wparam) <= IDM_PALETTE15)) 
+            if ((LOWORD(wparam) >= IDM_PALETTEBW) && (LOWORD(wparam) <= IDM_PALETTE15)) 
             {
-                palette = LOWORD(wparam) - IDM_PALETTE00;
-                for (int i=IDM_PALETTE00; i<=IDM_PALETTE15; i++) CheckMenuItem(hMenuOptions, i, MF_UNCHECKED);
+                palette = LOWORD(wparam) - IDM_PALETTEBW;
+                for (int i=IDM_PALETTEBW; i<=IDM_PALETTE15; i++) CheckMenuItem(hMenuOptions, i, MF_UNCHECKED);
                 CheckMenuItem(hMenuOptions, LOWORD(wparam), MF_CHECKED);
             }
             break;
@@ -514,7 +504,7 @@ LONG MainWndProc (HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
             return 0L;
         // timer ticks - check device health and try to restart it if something happened
         case WM_TIMER:
-            if (nactive <= 0) {
+            if (stop==0 && nactive<=0) {
                 nactive = 0;
                 int res = usb_write_firmware();
                 if (res) return 0L;
@@ -555,13 +545,13 @@ void InitWindows (void)
     // menus
     hMenuOptions = CreateMenu();
     AppendMenuW(hMenuOptions, MF_STRING, IDM_SHOW_SYNC, L"Show sync signal");
-    AppendMenuW(hMenuOptions, MF_STRING, IDM_BLACKWHI, L"Black & white");
     AppendMenuW(hMenuOptions, MF_SEPARATOR, 0, 0);
+    AppendMenuW(hMenuOptions, MF_STRING, IDM_PALETTEBW, L"Black & white");
     for (int i=IDM_PALETTE00; i<=IDM_PALETTE15; i++) {
         wsprintf(wcsTemp, L"Palette %i", i-IDM_PALETTE00);
         AppendMenuW(hMenuOptions, MF_STRING, i, wcsTemp);
     }
-    CheckMenuItem(hMenuOptions, IDM_PALETTE00+palette, MF_CHECKED);
+    CheckMenuItem(hMenuOptions, IDM_PALETTEBW+palette, MF_CHECKED);
     AppendMenuW(hMenuOptions, MF_SEPARATOR, 0, 0);
     AppendMenuW(hMenuOptions, MF_STRING, IDM_SAVESCR, L"Save screenshot");
     // AppendMenuW(hMenuOptions, MF_STRING, IDM_SAVE_SIG, L"Save signal binary");
