@@ -1,3 +1,7 @@
+// compile: 
+// 1) setup visual studio dev console
+// 2) cl /O2 fx2bk.cpp 
+
 #define UNICODE
 
 #include <windows.h>
@@ -10,10 +14,16 @@
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "winmm.lib")
 
+#define MODE_BK         0
+#define MODE_UKNC       1
 
-#define BK_SCR_WIDTH    0x00300     // (BK0011M) 768 pix clk in line
-#define BK_SCR_HEIGHT   0x00140     // (BK0011M) 320 lines total
-#define BK_SCR_FULL     0x3C000     // (BK0011M) 245760 pix clk in full screen
+#define B_SCR_WIDTH     0x00300     // (BK0011M) 768 pix clk in line
+#define B_SCR_HEIGHT    0x00140     // (BK0011M) 320 lines
+#define B_SCR_FULL      0x3C000     // (BK0011M) 245760 pix clk in full screen
+
+#define U_SCR_WIDTH     0x00320     // (UKNC) 800 pix clk in line
+#define U_SCR_HEIGHT    0x00138     // (UKNC) 312 lines
+#define U_SCR_FULL      0x3CF00     // (UKNC) 249600 pix clk in full screen
 
 #define TR_CHUNK_SIZE   0x20000     // chunk size for async data transferring from fx2
 // sigrok sources say it should hold 10ms of data (and be aligned with 0x200 bytes)
@@ -35,17 +45,23 @@
     const char* fw_filename = "fx2lafw-cypress-fx2.fw";
 
     volatile uint32_t* scr_buffers[8];
-    volatile uint32_t  scr_n_cur     = 0;
+    volatile uint32_t  scr_n_cur     = 0;    
     uint32_t  scr_cur_addr  = 0;
     uint32_t  scr_lsync_cnt = 0;
     uint8_t   scr_show_sync = 0;
+
+    int scr_mode   = MODE_UKNC;     // default mode to BK
+    int scr_width  = U_SCR_WIDTH;
+    int scr_height = U_SCR_HEIGHT;
+    int scr_full   = U_SCR_FULL;
 
     int stop = 0;                   // encountered an error somewhere
     int nactive = 0;                // active transfers count
     int handled_count = 0;          // count of processed usb bulk transfers
     int errors_count = 0;           // count of not processed
 
-    uint8_t palette = 1;            // BK palette = this palette - 1
+    // BK palettes
+    uint8_t palette = 1;
     uint32_t palette_data[] = {
         0x000000, 0x0000FF, 0x00FF00, 0xFF0000, // 0 - (special) black/white palette
         0x000000, 0x0000FF, 0x00FF00, 0xFF0000, // 1 - std palette 0
@@ -64,6 +80,12 @@
         0x000000, 0x00FFFF, 0xFFFF00, 0xFFFFFF,
         0x000000, 0xFFFF00, 0x00FF00, 0xFFFFFF,
         0x000000, 0x00FFFF, 0x00FF00, 0xFFFFFF
+    };
+
+    // UKNC palette
+    uint32_t palette_uknc[16] = {
+        0x000000, 0x800000, 0x008000, 0x808000, 0x000080, 0x800080, 0x008080, 0x808080,
+        0x000000, 0xFF0000, 0x00FF00, 0xFFFF00, 0x0000FF, 0xFF00FF, 0x00FFFF, 0xFFFFFF
     };
 
     char error[1024];
@@ -261,33 +283,53 @@ void LIBUSB_CALL cb_transfer_complete (libusb_transfer *t)
     }
     // process pixel data
     volatile uint32_t* screen_buf = scr_buffers[scr_n_cur];
-    //
     for (int i=0; i<t->actual_length; i++)
     {
-        uint8_t b = (t->buffer[i] ^ 0xFF) & 0x13;
-        uint32_t dw = palette_data[(palette<<2) | (b&3)];
-        if (b == 0x10) {
+        // byte of data
+        uint8_t b = t->buffer[i] ^ 0xFF;
+        // filter it just in case
+        b = (scr_mode==MODE_BK ? (b & 0x13) : (b & 0x1F));
+        // color dword
+        uint32_t dw = (scr_mode==MODE_BK ? (palette_data[(palette<<2) | (b&3)]) : palette_uknc[b&0xF]);
+        // sync presence (taken inverted in UKNC)
+        bool have_sync = (scr_mode==MODE_BK ? (b == 0x10) : (b == 0x00));        
+        if (have_sync) {
             if (scr_show_sync) dw = dw | 0x808080;
             scr_lsync_cnt++;
         } else {
-            // sort of hsync, exact 0x38 low sync signals
-            // seems BK is stable without using hsync (UKNC is not!)
-            //if (scr_lsync_cnt == 0x38) {
-            //    scr_cur_addr = 0x300 * (scr_cur_addr / 0x300);
-            //} else
-            // sort of vsync, exact 0x50 low sync signals
-            if (scr_lsync_cnt == 0x50) {
-                scr_cur_addr = BK_SCR_FULL-0x38-BK_SCR_WIDTH*10; // for centering
+            // BK mode
+            if (scr_mode == MODE_BK)
+            {
+                // sort of hsync, exact 0x38 low sync signals
+                // seems BK is stable without using hsync (UKNC is not!)
+                //if (scr_lsync_cnt == 0x38) {
+                //    scr_cur_addr = 0x300 * (scr_cur_addr / 0x300);
+                //} else
+                // sort of vsync, exact 0x50 low sync signals
+                if (scr_lsync_cnt == 0x50) {
+                    scr_cur_addr = B_SCR_FULL - 0x38 - B_SCR_WIDTH*10; // for centering
+                }
+            // UKNC mode
+            } else {
+                // sort of hsync, exact 0x40 low sync signals
+                if (scr_lsync_cnt == 0x40) {
+                    scr_cur_addr = U_SCR_WIDTH * (scr_cur_addr / U_SCR_WIDTH);
+                } else
+                // sort of vsync, exact 0x20 low sync signals
+                // to be 100% sure - change to >=0xC0 and adjust current addr with another value
+                if (scr_lsync_cnt == 0x20) {
+                    scr_cur_addr = U_SCR_FULL - 0x40 - U_SCR_WIDTH*9; // for centering
+                }
             }
             scr_lsync_cnt = 0;
         }
         screen_buf[scr_cur_addr++] = dw;
-        if (scr_cur_addr >= BK_SCR_FULL) {
+        if (scr_cur_addr >= scr_full) {
             scr_cur_addr = 0;
             scr_n_cur = ++scr_n_cur & 0x07;
             screen_buf = scr_buffers[scr_n_cur];
         }
-    }    
+    }
     // resubmit transfer
     int res = libusb_submit_transfer(t);
     if (res < 0) {
@@ -303,7 +345,7 @@ void LIBUSB_CALL cb_transfer_complete (libusb_transfer *t)
 // Windows 3.11 for workgroups ^_^ stuff
 ////////////////////////////////////////////////////////////////////////////////
 
-    LPCWSTR sMainClass    = L"DT_UKNC_FX2";
+    LPCWSTR sMainClass    = L"DT_BK_FX2";
     LPCWSTR sMainCaption  = L"BK FX2";
     LPCWSTR sErrorCaption = L"BK FX2 ERROR";
 
@@ -315,8 +357,8 @@ void LIBUSB_CALL cb_transfer_complete (libusb_transfer *t)
 
     int W_X  = 300;
     int W_Y  = 200;
-    int W_DX = BK_SCR_WIDTH;
-    int W_DY = BK_SCR_HEIGHT*2;
+    int W_DX = scr_width;
+    int W_DY = scr_height*2;
 
     const int IDM_SHOW_SYNC = 1;
     const int IDM_SAVE_SIG  = 2;
@@ -359,8 +401,8 @@ int WriteBmp()
     header.bfSize = sizeof(tagBITMAPFILEHEADER);
     header.bfOffBits = sizeof(tagBITMAPINFOHEADER) + sizeof(tagBITMAPFILEHEADER);
     info.biSize = sizeof(tagBITMAPINFOHEADER);
-    info.biWidth = BK_SCR_WIDTH;
-    info.biHeight = BK_SCR_HEIGHT*2;
+    info.biWidth = scr_width;
+    info.biHeight = scr_height*2;
     info.biPlanes = 1;
     info.biBitCount = 24;
     info.biSizeImage = info.biWidth*info.biHeight;
@@ -369,11 +411,11 @@ int WriteBmp()
     if (f == NULL) return 1;
     fwrite(&header, 1, sizeof(header), f);
     fwrite(&info, 1, sizeof(info), f);
-    for (int u=BK_SCR_FULL-BK_SCR_WIDTH; u>=0; u-=BK_SCR_WIDTH) 
+    for (int u=scr_full-scr_width; u>=0; u-=scr_width) 
     {
         uint32_t* data = (uint32_t*) scr_buffers[nLastBuf];
-        for (int v=0; v<BK_SCR_WIDTH; v++) fwrite(&data[u+v], 1, 3, f);
-        for (int v=0; v<BK_SCR_WIDTH; v++) fwrite(&data[u+v], 1, 3, f);
+        for (int v=0; v<scr_width; v++) fwrite(&data[u+v], 1, 3, f);
+        for (int v=0; v<scr_width; v++) fwrite(&data[u+v], 1, 3, f);
     }
     fclose(f);
     return 0;
@@ -397,14 +439,14 @@ void PaintScreen (int nbuf)
     BITMAPINFO info;
     memset(&info, 0, sizeof(BITMAPINFO));
     info.bmiHeader.biBitCount = 32;
-    info.bmiHeader.biWidth = BK_SCR_WIDTH;
-    info.bmiHeader.biHeight = -BK_SCR_HEIGHT;
+    info.bmiHeader.biWidth = scr_width;
+    info.bmiHeader.biHeight = 0-scr_height;
     info.bmiHeader.biPlanes = 1;
     info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
     info.bmiHeader.biSizeImage = 0;
     info.bmiHeader.biCompression = BI_RGB;
     HDC dc = GetDC(hMain);    
-    StretchDIBits(dc, 0, 0, BK_SCR_WIDTH, BK_SCR_HEIGHT*2, 0, 0, BK_SCR_WIDTH, BK_SCR_HEIGHT, (void *)(scr_buffers[nbuf]), &info, DIB_RGB_COLORS, SRCCOPY);
+    StretchDIBits(dc, 0, 0, scr_width, scr_height*2, 0, 0, scr_width, scr_height, (void *)(scr_buffers[nbuf]), &info, DIB_RGB_COLORS, SRCCOPY);
     ReleaseDC( hMain, dc );
 }
 
@@ -419,17 +461,13 @@ DWORD WINAPI RenderThreadProc (LPVOID lpParam)
         volatile uint32_t *buf = scr_buffers[n];
         // black & white mode?
         if (palette == 0) {
-            for (uint32_t u=0; u<BK_SCR_FULL; u+=2) {
+            for (uint32_t u=0; u<scr_full; u+=2) {
                 uint32_t b1 = (buf[u] & 0x00000F) ? 0xFFFFFF : 0x000000;
                 uint32_t b2 = (buf[u] & 0x000F00) ? 0xFFFFFF : 0x000000;
                 if (buf[u] & 0x0F0000) { b1=0xFFFFFF; b2=0xFFFFFF; }
                 buf[u] = b1;
                 buf[u+1] = b2;
             }
-        } else {
-            // fix green bit desync (in my hardware it's not well aligned with pixel clocks)
-            // simple duplicate pixels (it's OK for BK, they are doubled anyway)
-            //for (uint32_t u=0; u<BK_SCR_FULL; u+=2) buf[u+1] = buf[u];
         }
         //
         PaintScreen(n);
@@ -449,7 +487,7 @@ int StartUsbProcess ()
 {
     // allocate 8 buffers for receiving screens
     for (int i=0; i<8; i++) 
-        scr_buffers[i] = (uint32_t*) malloc(BK_SCR_FULL*sizeof(uint32_t));
+        scr_buffers[i] = (uint32_t*) malloc(scr_full*sizeof(uint32_t));
     // start usb 
     int res = usb_write_firmware();
     if (res != 0) return res;
