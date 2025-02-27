@@ -25,6 +25,8 @@
 #define U_SCR_HEIGHT    0x00138     // (UKNC) 312 lines
 #define U_SCR_FULL      0x3CF00     // (UKNC) 249600 pix clk in full screen
 
+#define SCR_MAXBUF      0x40000     // max from both full screens plus some extra
+
 #define TR_CHUNK_SIZE   0x20000     // chunk size for async data transferring from fx2
 // sigrok sources say it should hold 10ms of data (and be aligned with 0x200 bytes)
 
@@ -50,10 +52,10 @@
     uint32_t  scr_lsync_cnt = 0;
     uint8_t   scr_show_sync = 0;
 
-    int scr_mode   = MODE_UKNC;     // default mode to BK
-    int scr_width  = U_SCR_WIDTH;
-    int scr_height = U_SCR_HEIGHT;
-    int scr_full   = U_SCR_FULL;
+    int scr_mode   = MODE_BK;     // default mode to BK
+    int scr_width  = B_SCR_WIDTH;
+    int scr_height = B_SCR_HEIGHT;
+    int scr_full   = B_SCR_FULL;
 
     int stop = 0;                   // encountered an error somewhere
     int nactive = 0;                // active transfers count
@@ -352,7 +354,7 @@ void LIBUSB_CALL cb_transfer_complete (libusb_transfer *t)
     HINSTANCE       hMainInstance;
     HWND            hMain, hError;
     HFONT           hFont;
-    HMENU           hMenuOptions/*, hMenuSavebin*/;
+    HMENU           hMenuMode, hMenuOptions/*, hMenuSavebin*/;
     HANDLE          hUsbThread, hRenderThread;
 
     int W_X  = 300;
@@ -363,6 +365,8 @@ void LIBUSB_CALL cb_transfer_complete (libusb_transfer *t)
     const int IDM_SHOW_SYNC = 1;
     const int IDM_SAVE_SIG  = 2;
     const int IDM_SAVESCR   = 4;
+    const int IDM_BK0011M   = 5;
+    const int IDM_UKNC      = 6;
 
     const int IDM_PALETTEBW  = 0x0F;
     const int IDM_PALETTE00  = 0x10;
@@ -487,7 +491,7 @@ int StartUsbProcess ()
 {
     // allocate 8 buffers for receiving screens
     for (int i=0; i<8; i++) 
-        scr_buffers[i] = (uint32_t*) malloc(scr_full*sizeof(uint32_t));
+        scr_buffers[i] = (uint32_t*) malloc(SCR_MAXBUF*sizeof(uint32_t));
     // start usb 
     int res = usb_write_firmware();
     if (res != 0) return res;
@@ -501,6 +505,32 @@ int StartUsbProcess ()
 }
 
 
+// sets mode BK or UKNC (screen width and others)
+//
+void SetNewMode ()
+{
+    if (scr_mode == MODE_BK) {
+        CheckMenuItem(hMenuMode, IDM_BK0011M, MF_CHECKED);
+        CheckMenuItem(hMenuMode, IDM_UKNC, MF_UNCHECKED);
+        scr_width  = B_SCR_WIDTH;
+        scr_height = B_SCR_HEIGHT;
+        scr_full   = B_SCR_FULL;
+    } else {
+        CheckMenuItem(hMenuMode, IDM_BK0011M, MF_UNCHECKED);
+        CheckMenuItem(hMenuMode, IDM_UKNC, MF_CHECKED);
+        scr_width  = U_SCR_WIDTH;
+        scr_height = U_SCR_HEIGHT;
+        scr_full   = U_SCR_FULL;
+    }
+    W_DX = scr_width;
+    W_DY = scr_height*2;
+    RECT rect = {W_X, W_Y, W_X+W_DX, W_Y+W_DY};
+    DWORD style = WS_CAPTION | WS_MINIMIZEBOX | WS_SYSMENU | WS_VISIBLE;
+    AdjustWindowRectEx(&rect, style, /*menu presence*/true, NULL);
+    SetWindowPos(hMain, NULL, rect.left, rect.top, rect.right-rect.left, rect.bottom-rect.top, 0);
+}
+
+
 // processing messages for all windows in class
 //
 LONG MainWndProc (HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
@@ -510,6 +540,16 @@ LONG MainWndProc (HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
         // usually menu
         case WM_COMMAND:
             switch (LOWORD(wparam)) {
+                // switch modes
+                case IDM_BK0011M:
+                    scr_mode = MODE_BK;
+                    SetNewMode();
+                    break;
+                case IDM_UKNC:
+                    scr_mode = MODE_UKNC;
+                    SetNewMode();
+                    break;
+                // sync signal
                 case IDM_SHOW_SYNC:
                     scr_show_sync = 1 - scr_show_sync;
                     CheckMenuItem(hMenuOptions, IDM_SHOW_SYNC, scr_show_sync ? MF_CHECKED : MF_UNCHECKED);
@@ -580,7 +620,11 @@ void InitWindows (void)
         MessageBoxW(NULL, L"Unable to create main window (how it can be?)", sErrorCaption, MB_OK);
         ExitProcess(1);
     }
-    // menus
+    // mode menu
+    hMenuMode = CreateMenu();
+    AppendMenuW(hMenuMode, MF_STRING, IDM_BK0011M, L"BK0011M");
+    AppendMenuW(hMenuMode, MF_STRING, IDM_UKNC, L"UKNC");
+    // option menu
     hMenuOptions = CreateMenu();
     AppendMenuW(hMenuOptions, MF_STRING, IDM_SHOW_SYNC, L"Show sync signal");
     AppendMenuW(hMenuOptions, MF_SEPARATOR, 0, 0);
@@ -594,12 +638,15 @@ void InitWindows (void)
     AppendMenuW(hMenuOptions, MF_STRING, IDM_SAVESCR, L"Save screenshot");
     // AppendMenuW(hMenuOptions, MF_STRING, IDM_SAVE_SIG, L"Save signal binary");
     HMENU hMenubar = CreateMenu();
+    AppendMenuW(hMenubar, MF_POPUP, (UINT_PTR)hMenuMode, L"Mode");
     AppendMenuW(hMenubar, MF_POPUP, (UINT_PTR)hMenuOptions, L"Options");
     SetMenu(hMain, hMenubar);
     // rendering
     hRenderThread = CreateThread(NULL, 0, RenderThreadProc, 0, 0, NULL);
     // TODO: use timer for check FX2 is alive and try to (re)start it if not
     SetTimer(hMain, 1/*Timer ID*/, 5000, NULL);
+    // at last switch mode (BK or UKNC)
+    SetNewMode();
 }
 
 
